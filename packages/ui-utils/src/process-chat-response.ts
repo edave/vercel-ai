@@ -41,16 +41,18 @@ export async function processChatResponse({
   getCurrentDate?: () => Date;
   lastMessage: UIMessage | undefined;
 }) {
-  const replaceLastMessage = lastMessage?.role === 'assistant';
+  console.log('Custom processChatResponse Invoked', lastMessage);
+  let replaceLastMessage = lastMessage?.role === 'assistant';
+  console.log('replaceLastMessage', replaceLastMessage);
   let step = replaceLastMessage
     ? 1 +
       // find max step in existing tool invocations:
-      (lastMessage.toolInvocations?.reduce((max, toolInvocation) => {
+      (lastMessage?.toolInvocations?.reduce((max, toolInvocation) => {
         return Math.max(max, toolInvocation.step ?? 0);
       }, 0) ?? 0)
     : 0;
 
-  const message: UIMessage = replaceLastMessage
+  let message: UIMessage = replaceLastMessage && lastMessage
     ? structuredClone(lastMessage)
     : {
         id: generateId(),
@@ -59,6 +61,9 @@ export async function processChatResponse({
         content: '',
         parts: [],
       };
+  
+  // Track the current message ID
+  let currentMessageId = message.id;
 
   let currentTextPart: TextUIPart | undefined = undefined;
   let currentReasoningPart: ReasoningUIPart | undefined = undefined;
@@ -100,9 +105,9 @@ export async function processChatResponse({
   > = {};
 
   let usage: LanguageModelUsage = {
-    completionTokens: NaN,
-    promptTokens: NaN,
-    totalTokens: NaN,
+    completionTokens: Number.NaN,
+    promptTokens: Number.NaN,
+    totalTokens: Number.NaN,
   };
   let finishReason: LanguageModelV1FinishReason = 'unknown';
 
@@ -127,12 +132,40 @@ export async function processChatResponse({
       // forwarded to rendering):
       revisionId: generateId(),
     } as UIMessage;
-
+    
     update({
       message: copiedMessage,
       data: copiedData,
       replaceLastMessage,
     });
+  }
+  
+  // Function to create a new message when detecting a new message ID
+  function createNewMessage(messageId: string) {
+    // Send the current message with its final state
+    execUpdate();
+    
+    // Create a new message
+    message = {
+      id: messageId,
+      createdAt: getCurrentDate(),
+      role: 'assistant',
+      content: '',
+      parts: [],
+    };
+    
+    // Update the current message ID
+    currentMessageId = messageId;
+    
+    // Reset state for the new message
+    currentTextPart = undefined;
+    currentReasoningPart = undefined;
+    currentReasoningTextDetail = undefined;
+    step = 0;
+    // messageAnnotations = undefined;
+    
+    // New message should not replace the previous one
+    replaceLastMessage = false;
   }
 
   await processDataStream({
@@ -250,7 +283,9 @@ export async function processChatResponse({
         args: partialArgs,
       } as const;
 
-      message.toolInvocations![partialToolCall.index] = invocation;
+      if (message.toolInvocations && partialToolCall.index < message.toolInvocations.length) {
+        message.toolInvocations[partialToolCall.index] = invocation;
+      }
 
       updateToolInvocationPart(value.toolCallId, invocation);
 
@@ -265,8 +300,9 @@ export async function processChatResponse({
 
       if (partialToolCalls[value.toolCallId] != null) {
         // change the partial tool call to a full tool call
-        message.toolInvocations![partialToolCalls[value.toolCallId].index] =
-          invocation;
+        if (message.toolInvocations && partialToolCalls[value.toolCallId].index < message.toolInvocations.length) {
+          message.toolInvocations[partialToolCalls[value.toolCallId].index] = invocation;
+        }
       } else {
         if (message.toolInvocations == null) {
           message.toolInvocations = [];
@@ -293,8 +329,9 @@ export async function processChatResponse({
           } as const;
 
           // store the result in the tool invocation
-          message.toolInvocations![message.toolInvocations!.length - 1] =
-            invocation;
+          if (message.toolInvocations && message.toolInvocations.length > 0) {
+            message.toolInvocations[message.toolInvocations.length - 1] = invocation;
+          }
 
           updateToolInvocationPart(value.toolCallId, invocation);
 
@@ -355,8 +392,12 @@ export async function processChatResponse({
       currentReasoningTextDetail = undefined;
     },
     onStartStepPart(value) {
-      // keep message id stable when we are updating an existing message:
-      if (!replaceLastMessage) {
+      // Check if a new message ID has been sent
+      if (value.messageId && value.messageId !== currentMessageId) {
+        // Create a new message with the new ID
+        createNewMessage(value.messageId);
+      } else if (!replaceLastMessage) {
+        // For existing behavior: keep message id stable when we are updating an existing message
         message.id = value.messageId;
       }
     },
